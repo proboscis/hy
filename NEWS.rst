@@ -2,10 +2,10 @@
 
 Hy is `semantically versioned <https://semver.org/>`__ since 1.0.0.
 
-Unreleased
+1.3.1 ("Eyes in the Sky", released 2026-07-31)
 ======================================================================
 
-Supports Python 3.x – Python 3.y
+Supports Python 3.9 – Python 3.15
 
 Bug Fixes
 ------------------------------
