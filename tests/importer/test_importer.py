@@ -434,10 +434,10 @@ def test_macro_deps_regular_bytecode(tmp_path):
 
 
 @bytecode_is_written
-@pytest.mark.parametrize("damage", ["delete", "garble", "other bytecode"])
+@pytest.mark.parametrize("damage", ["delete", "garble"])
 def test_macro_deps_unrecorded_bytecode(tmp_path, damage):
     """Bytecode with no usable record of its macros (e.g., from an older
-    Hy, or rewritten by another tool) is recompiled."""
+    Hy) is recompiled."""
     project = MacroDepsProject(tmp_path)
     assert project.run()[0] == "m1-h1"
     record = project.record(project.user)
@@ -445,19 +445,47 @@ def test_macro_deps_unrecorded_bytecode(tmp_path, damage):
 
     if damage == "delete":
         record.unlink()
-    elif damage == "garble":
-        record.write_bytes(b"{")
     else:
-        # The same record, but beside a different bytecode file for the
-        # same source.
-        bytecode = project.bytecode(project.user)
-        data = bytecode.read_bytes()
-        code = marshal.loads(data[16:])
-        bytecode.write_bytes(data[:16] + marshal.dumps(code.replace(co_name="x")))
+        record.write_bytes(b"{")
 
     assert project.run() == ("m1-h1", {"user.hy"})
     assert record.read_bytes() == original
     assert project.run() == ("m1-h1", set())
+
+
+@bytecode_is_written
+def test_macro_deps_record_of_other_source(tmp_path):
+    """A record left from bytecode compiled from another version of the
+    source (e.g., when an older Hy recompiled the module after an edit)
+    doesn't vouch for the current bytecode."""
+    project = MacroDepsProject(tmp_path)
+    assert project.run()[0] == "m1-h1"
+    record = project.record(project.user)
+    stale = record.read_bytes()
+    project.write(project.user, '(require pkg.macros [m]) (setv x (+ (m) "!"))')
+    assert project.run() == ("m1-h1!", {"user.hy"})
+    current = record.read_bytes()
+
+    record.write_bytes(stale)
+    assert project.run() == ("m1-h1!", {"user.hy"})
+    assert record.read_bytes() == current
+    assert project.run() == ("m1-h1!", set())
+
+
+@bytecode_is_written
+def test_macro_deps_remarshalled_bytecode(tmp_path):
+    """Rewriting only how the code is marshalled, as a build step may do
+    for reproducibility, keeps the record valid."""
+    project = MacroDepsProject(tmp_path)
+    assert project.run()[0] == "m1-h1"
+    bytecode = project.bytecode(project.user)
+    data = bytecode.read_bytes()
+    rewritten = data[:16] + marshal.dumps(marshal.loads(data[16:]), 2)
+    assert rewritten != data
+    bytecode.write_bytes(rewritten)
+
+    assert project.run() == ("m1-h1", set())
+    assert bytecode.read_bytes() == rewritten
 
 
 @bytecode_is_written

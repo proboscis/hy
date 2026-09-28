@@ -233,11 +233,20 @@ def _macro_dependencies(module, path):
     return out
 
 
+# A record names the bytecode file it describes by the file's header,
+# which says what the file was compiled from (the source's modification
+# time and size, or the hash of the source) and how it's checked. The
+# rest of the file isn't included, so that tools can rewrite how the
+# code is marshalled (e.g., to make builds reproducible) without making
+# the record look stale.
+_BYTECODE_HEADER_BYTES = 16
+
+
 def _macro_deps_record(bytecode, deps):
     "Return the record for the bytecode file `bytecode`."
     return json.dumps(dict(
         hy=hy.__version__,
-        bytecode=_digest(bytecode),
+        header=bytecode[:_BYTECODE_HEADER_BYTES].hex(),
         deps=deps)).encode("utf-8")
 
 
@@ -249,7 +258,7 @@ def _macro_deps_are_current(record, bytecode):
     try:
         record = json.loads(record)
         if (record["hy"] != hy.__version__ or
-                record["bytecode"] != _digest(bytecode)):
+                record["header"] != bytecode[:_BYTECODE_HEADER_BYTES].hex()):
             return False
         for fname, digest in record["deps"]:
             if _source_digest(fname) != digest:
@@ -284,7 +293,7 @@ def _hy_get_code(self, fullname):
         # There's no bytecode to distrust. The usual path will compile
         # the source.
         return _py_get_code(self, fullname)
-    if (len(bytecode) < 16 or
+    if (len(bytecode) < _BYTECODE_HEADER_BYTES or
             bytecode[:4] != importlib.util.MAGIC_NUMBER or
             not _python_checks_source(bytecode)):
         # Python will either recompile the source anyway or use the
@@ -334,8 +343,9 @@ def _hy_cache_bytecode(self, source_path, bytecode_path, data):
     deps = self.__dict__.pop("_hy_macro_deps", None)
     result = _py_cache_bytecode(self, source_path, bytecode_path, data)
     if deps is not None:
-        # The record names the bytecode it describes, so if only one of
-        # the two files gets written, the pair is recompiled next time.
+        # The record names the header of the bytecode it describes, so
+        # a record left beside bytecode compiled from another version of
+        # the source doesn't vouch for that bytecode.
         self.set_data(
             _macro_deps_path(bytecode_path),
             _macro_deps_record(bytes(data), deps))
