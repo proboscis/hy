@@ -10,7 +10,10 @@ Bug Fixes
 * Bytecode compiled from Hy source is now recompiled when a file that
   provides one of the module's macros changes. Previously, modules
   could keep running stale macro expansions, since Python checks a
-  bytecode file only against the source it was compiled from.
+  bytecode file only against the source it was compiled from. The
+  record of these files is kept beside the bytecode file, in a file
+  ending with `.hydeps`, and isn't checked for bytecode that Python
+  doesn't check against its source (PEP 552's unchecked-hash files).
 
 Misc. Improvements
 ------------------------------

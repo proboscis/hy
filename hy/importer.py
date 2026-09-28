@@ -1,4 +1,6 @@
+import _imp
 import builtins
+import hashlib
 import importlib
 import inspect
 import json
@@ -125,32 +127,41 @@ def _could_be_hy_src(filename):
 
 # Bytecode compiled from Hy source depends not only on that source, but
 # also on the macros it was expanded with. Python's own staleness check
-# for a bytecode file looks only at the modification time and size of
-# the source, so after a change to a macro, modules that use the macro
-# would keep running their old expansions. To prevent this, we append to
-# each bytecode file a record of the files that the module's macros came
+# for a bytecode file looks only at the source it was compiled from, so
+# after a change to a macro, modules that use the macro would keep
+# running their old expansions. To prevent this, we write beside each
+# bytecode file a record of the files that the module's macros came
 # from, and recompile when the record is missing or no longer matches.
-# (`marshal.loads` ignores trailing bytes, so the file is still a valid
-# bytecode file for Python's import system.)
+# The bytecode file itself stays a regular bytecode file, so that other
+# tools that read or rewrite bytecode files keep working.
+#
+# The record is checked only when Python itself would check the
+# bytecode file against its source. In particular, a hash-based
+# bytecode file that Python doesn't check (PEP 552's "unchecked-hash")
+# is trusted as it is, and so is its expansion of macros.
 
-_MACRO_DEPS_MAGIC = b"\x00HYMACRODEPS1"
-_MACRO_DEPS_LENGTH_BYTES = 4
+_MACRO_DEPS_SUFFIX = ".hydeps"
 
-# The modification time and size of each source file as of when we
-# loaded it, so that a dependency is recorded as the version that's
-# actually in memory.
-_loaded_source_stats = {}
-
-_py_path_stats = importlib.machinery.SourceFileLoader.path_stats
-
-
-def _recording_path_stats(self, path):
-    stats = _py_path_stats(self, path)
-    _loaded_source_stats[path] = (stats["mtime"], stats["size"])
-    return stats
+# The digest of each source file's contents, computed at most once per
+# process. A module compiled in this process has the digest of the
+# source that was actually compiled, so that a dependency is recorded as
+# the version that's in memory.
+_source_digests = {}
 
 
-importlib.machinery.SourceFileLoader.path_stats = _recording_path_stats
+def _digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def _source_digest(path):
+    if path not in _source_digests:
+        with open(path, "rb") as o:
+            _source_digests[path] = _digest(o.read())
+    return _source_digests[path]
+
+
+def _macro_deps_path(bytecode_path):
+    return os.path.splitext(bytecode_path)[0] + _MACRO_DEPS_SUFFIX
 
 
 def _top_package(module_name):
@@ -182,7 +193,7 @@ def _referenced_module_names(namespace):
 
 def _macro_dependencies(module, path):
     """Return the source files that the expansion of `module` (compiled
-    from `path`) depends on, as a sorted list of `[path, mtime, size]`.
+    from `path`) depends on, as a sorted list of `[path, digest]`.
 
     These are the files of the modules that provide `module`'s macros,
     plus the modules in the same top-level package that a provider
@@ -190,7 +201,7 @@ def _macro_dependencies(module, path):
     providers of each provider's own macros. Hy itself is covered by
     the Hy version in the record."""
 
-    files = {}
+    files = set()
     seen = set()
     pending = list(_macro_providers(vars(module)))
     while pending:
@@ -205,7 +216,7 @@ def _macro_dependencies(module, path):
         if not isinstance(fname, str) or fname == path:
             continue
         if fname.endswith(tuple(importlib.machinery.SOURCE_SUFFIXES)):
-            files[fname] = None
+            files.add(fname)
         pending.extend(_macro_providers(vars(provider)))
         for other in _referenced_module_names(vars(provider)):
             if other not in seen and _top_package(other) == _top_package(name):
@@ -215,49 +226,48 @@ def _macro_dependencies(module, path):
 
     out = []
     for fname in sorted(files):
-        stats = _loaded_source_stats.get(fname)
-        if stats is None:
-            try:
-                st = os.stat(fname)
-            except OSError:
-                continue
-            stats = (st.st_mtime, st.st_size)
-        out.append([fname, *stats])
+        try:
+            out.append([fname, _source_digest(fname)])
+        except OSError:
+            continue
     return out
 
 
-def _macro_deps_trailer(deps):
-    record = json.dumps(dict(hy=hy.__version__, deps=deps)).encode("utf-8")
-    return (
-        record +
-        len(record).to_bytes(_MACRO_DEPS_LENGTH_BYTES, "little") +
-        _MACRO_DEPS_MAGIC)
+def _macro_deps_record(bytecode, deps):
+    "Return the record for the bytecode file `bytecode`."
+    return json.dumps(dict(
+        hy=hy.__version__,
+        bytecode=_digest(bytecode),
+        deps=deps)).encode("utf-8")
 
 
-def _macro_deps_are_current(bytecode):
-    """Given the contents of a bytecode file, return true if it records
-    its macro dependencies and they're all unchanged."""
+def _macro_deps_are_current(record, bytecode):
+    """Given the contents of a record and of the bytecode file beside
+    it, return true if the record is of that bytecode file and its
+    macro dependencies are all unchanged."""
 
-    if not bytecode.endswith(_MACRO_DEPS_MAGIC):
-        return False
-    end = len(bytecode) - len(_MACRO_DEPS_MAGIC) - _MACRO_DEPS_LENGTH_BYTES
-    if end < 0:
-        return False
-    length = int.from_bytes(
-        bytecode[end : end + _MACRO_DEPS_LENGTH_BYTES], "little")
-    if length > end:
-        return False
     try:
-        record = json.loads(bytes(bytecode[end - length : end]))
-        if record["hy"] != hy.__version__:
+        record = json.loads(record)
+        if (record["hy"] != hy.__version__ or
+                record["bytecode"] != _digest(bytecode)):
             return False
-        for fname, mtime, size in record["deps"]:
-            st = os.stat(fname)
-            if (st.st_mtime, st.st_size) != (mtime, size):
+        for fname, digest in record["deps"]:
+            if _source_digest(fname) != digest:
                 return False
     except (ValueError, KeyError, TypeError, OSError):
         return False
     return True
+
+
+def _python_checks_source(bytecode):
+    """Return true if Python checks the bytecode file `bytecode` against
+    its source before using it (as for the default timestamp-based
+    files and PEP 552's "checked-hash" files)."""
+    flags = int.from_bytes(bytecode[4:8], "little")
+    if not flags & 0b01:
+        return True
+    mode = _imp.check_hash_based_pycs
+    return mode == "always" or (mode != "never" and bool(flags & 0b10))
 
 
 _py_get_code = importlib.machinery.SourceFileLoader.get_code
@@ -274,26 +284,42 @@ def _hy_get_code(self, fullname):
         # There's no bytecode to distrust. The usual path will compile
         # the source.
         return _py_get_code(self, fullname)
-    if _macro_deps_are_current(bytecode):
+    if (len(bytecode) < 16 or
+            bytecode[:4] != importlib.util.MAGIC_NUMBER or
+            not _python_checks_source(bytecode)):
+        # Python will either recompile the source anyway or use the
+        # bytecode without checking it.
         return _py_get_code(self, fullname)
+    try:
+        if _macro_deps_are_current(
+                self.get_data(_macro_deps_path(bytecode_path)), bytecode):
+            return _py_get_code(self, fullname)
+    except OSError:
+        pass
 
     # Compile from source regardless of what the bytecode file says
-    # about the source's modification time.
+    # about the source, and write the same kind of bytecode file.
+    source = self.get_data(source_path)
     try:
         stats = self.path_stats(source_path)
     except OSError:
         stats = None
     code = self.source_to_code(
-        self.get_data(source_path),
+        source,
         source_path,
         **(dict(fullname=fullname) if hy.compat.PY3_15 else {}))
     if stats is not None and not sys.dont_write_bytecode:
+        flags = int.from_bytes(bytecode[4:8], "little")
+        data = (
+            importlib._bootstrap_external._code_to_hash_pyc(
+                code,
+                importlib.util.source_hash(source),
+                bool(flags & 0b10))
+            if flags & 0b01 else
+            importlib._bootstrap_external._code_to_timestamp_pyc(
+                code, stats["mtime"], stats["size"]))
         try:
-            self._cache_bytecode(
-                source_path,
-                bytecode_path,
-                importlib._bootstrap_external._code_to_timestamp_pyc(
-                    code, stats["mtime"], stats["size"]))
+            self._cache_bytecode(source_path, bytecode_path, data)
         except (NotImplementedError, OSError):
             pass
     return code
@@ -306,9 +332,14 @@ _py_cache_bytecode = importlib.machinery.SourceFileLoader._cache_bytecode
 
 def _hy_cache_bytecode(self, source_path, bytecode_path, data):
     deps = self.__dict__.pop("_hy_macro_deps", None)
+    result = _py_cache_bytecode(self, source_path, bytecode_path, data)
     if deps is not None:
-        data = bytes(data) + _macro_deps_trailer(deps)
-    return _py_cache_bytecode(self, source_path, bytecode_path, data)
+        # The record names the bytecode it describes, so if only one of
+        # the two files gets written, the pair is recompiled next time.
+        self.set_data(
+            _macro_deps_path(bytecode_path),
+            _macro_deps_record(bytes(data), deps))
+    return result
 
 
 importlib.machinery.SourceFileLoader._cache_bytecode = _hy_cache_bytecode
@@ -320,6 +351,7 @@ def _hy_source_to_code(self, data, path, fullname=None, _optimize=-1):
             print("Compiling", path, file=sys.stderr)
         source = data.decode("utf-8")
         hy_tree = read_many(source, filename=path, skip_shebang=True, reader=HyReader())
+        _source_digests[path] = _digest(data)
         with loader_module_obj(self) as module:
             data = hy_compile(hy_tree, module)
             self._hy_macro_deps = _macro_dependencies(module, path)

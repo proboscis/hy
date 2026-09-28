@@ -1,10 +1,12 @@
 import ast
 import importlib
+import io
 import marshal
 import os
 import runpy
 import subprocess
 import sys
+import types
 from importlib import reload
 from pathlib import Path
 
@@ -332,6 +334,10 @@ class MacroDepsProject:
     def bytecode(self, source):
         return Path(importlib.util.cache_from_source(str(source)))
 
+    def record(self, source):
+        from hy.importer import _macro_deps_path
+        return Path(_macro_deps_path(str(self.bytecode(source))))
+
     def run(self):
         "Import `user` in a new interpreter. Return `x` and the files compiled."
         result = subprocess.run(
@@ -403,22 +409,117 @@ def test_macro_deps_transitive(tmp_path):
     assert project.run() == ("b2", set())
 
 
+def pyc_flags(data):
+    return int.from_bytes(data[4:8], "little")
+
+
+def assert_regular_bytecode(data):
+    "`data` is a bytecode file that `marshal` reads to the end."
+    assert data[:4] == importlib.util.MAGIC_NUMBER
+    f = io.BytesIO(data[16:])
+    assert isinstance(marshal.load(f), types.CodeType)
+    assert f.tell() == len(data) - 16
+
+
 @bytecode_is_written
-def test_macro_deps_unrecorded_bytecode(tmp_path):
-    """Bytecode with no record of its macros (e.g., from an older Hy)
-    is recompiled, and is a regular bytecode file either way."""
+def test_macro_deps_regular_bytecode(tmp_path):
+    """The record is written beside the bytecode file, which is a
+    regular bytecode file with nothing after the marshalled code."""
     project = MacroDepsProject(tmp_path)
     assert project.run()[0] == "m1-h1"
+    for source in (project.user, project.macros):
+        bytecode = project.bytecode(source)
+        assert_regular_bytecode(bytecode.read_bytes())
+        assert project.record(source).exists()
 
-    from hy.importer import _MACRO_DEPS_MAGIC
-    bytecode = project.bytecode(project.user)
-    data = bytecode.read_bytes()
-    assert data.endswith(_MACRO_DEPS_MAGIC)
-    # The record follows the marshalled code, which Python reads alone.
-    code = marshal.loads(data[16:])
-    assert data.index(marshal.dumps(code)) == 16
-    bytecode.write_bytes(data[: 16 + len(marshal.dumps(code))])
+
+@bytecode_is_written
+@pytest.mark.parametrize("damage", ["delete", "garble", "other bytecode"])
+def test_macro_deps_unrecorded_bytecode(tmp_path, damage):
+    """Bytecode with no usable record of its macros (e.g., from an older
+    Hy, or rewritten by another tool) is recompiled."""
+    project = MacroDepsProject(tmp_path)
+    assert project.run()[0] == "m1-h1"
+    record = project.record(project.user)
+    original = record.read_bytes()
+
+    if damage == "delete":
+        record.unlink()
+    elif damage == "garble":
+        record.write_bytes(b"{")
+    else:
+        # The same record, but beside a different bytecode file for the
+        # same source.
+        bytecode = project.bytecode(project.user)
+        data = bytecode.read_bytes()
+        code = marshal.loads(data[16:])
+        bytecode.write_bytes(data[:16] + marshal.dumps(code.replace(co_name="x")))
 
     assert project.run() == ("m1-h1", {"user.hy"})
-    assert bytecode.read_bytes() == data
+    assert record.read_bytes() == original
     assert project.run() == ("m1-h1", set())
+
+
+@bytecode_is_written
+def test_macro_deps_by_contents(tmp_path):
+    """A dependency is compared by its contents, so a new modification
+    time alone doesn't recompile the modules that use its macros."""
+    project = MacroDepsProject(tmp_path)
+    assert project.run()[0] == "m1-h1"
+    project.write(project.helper, project.helper.read_text())
+    project.write(project.macros, project.macros.read_text())
+    # `macros.hy` is recompiled because Python checks its bytecode
+    # against its own modification time, but `user.hy` isn't.
+    assert project.run() == ("m1-h1", {"macros.hy"})
+    assert project.run() == ("m1-h1", set())
+
+
+def compile_hash_based(source, mode):
+    """Compile `source` to a hash-based bytecode file with `py_compile`,
+    in a new interpreter, as a build step would."""
+    subprocess.run(
+        [sys.executable, "-c",
+            "import sys, hy, py_compile; "
+            "py_compile.compile(sys.argv[1], doraise=True, "
+            f"invalidation_mode=py_compile.PycInvalidationMode.{mode})",
+            str(source)],
+        cwd=source.parent,
+        env={**os.environ, "PYTHONPATH": str(source.parent)},
+        check=True)
+
+
+@bytecode_is_written
+def test_macro_deps_unchecked_hash(tmp_path):
+    """Bytecode that Python uses without checking its source is also
+    used without checking its macros, with or without a record."""
+    project = MacroDepsProject(tmp_path)
+    assert project.run()[0] == "m1-h1"
+    for source in (project.user, project.macros):
+        project.record(source).unlink()
+        compile_hash_based(source, "UNCHECKED_HASH")
+    user_bytecode = project.bytecode(project.user).read_bytes()
+    assert pyc_flags(user_bytecode) == 0b01
+
+    assert project.run() == ("m1-h1", set())
+    project.write(project.helper, 'def suffix(): return "h2"')
+    assert project.run() == ("m1-h1", set())
+    assert project.bytecode(project.user).read_bytes() == user_bytecode
+    assert not project.record(project.user).exists()
+
+
+@bytecode_is_written
+def test_macro_deps_checked_hash(tmp_path):
+    """Bytecode that Python checks by the hash of its source is checked
+    against its macros too, and is recompiled to the same kind."""
+    project = MacroDepsProject(tmp_path)
+    assert project.run()[0] == "m1-h1"
+    compile_hash_based(project.user, "CHECKED_HASH")
+    project.record(project.user).unlink()
+
+    assert project.run() == ("m1-h1", {"user.hy"})
+    assert pyc_flags(project.bytecode(project.user).read_bytes()) == 0b11
+    assert project.run() == ("m1-h1", set())
+    project.write(project.helper, 'def suffix(): return "h2"')
+    assert project.run() == ("m1-h2", {"user.hy"})
+    assert pyc_flags(project.bytecode(project.user).read_bytes()) == 0b11
+    assert project.run() == ("m1-h2", set())
