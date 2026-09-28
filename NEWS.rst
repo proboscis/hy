@@ -5,6 +5,13 @@ Hy is `semantically versioned <https://semver.org/>`__ since 1.0.0.
 Unreleased
 ======================================================================
 
+Bug Fixes
+------------------------------
+* Bytecode compiled from Hy source is now recompiled when a file that
+  provides one of the module's macros changes. Previously, modules
+  could keep running stale macro expansions, since Python checks a
+  bytecode file only against the source it was compiled from.
+
 Misc. Improvements
 ------------------------------
 * `require`, `hy.eval`, and other operations that need the calling frame

@@ -1,6 +1,9 @@
 import ast
 import importlib
+import marshal
+import os
 import runpy
+import subprocess
 import sys
 from importlib import reload
 from pathlib import Path
@@ -295,3 +298,127 @@ def test_zipimport(tmp_path, monkeypatch):
 def test_eval_requiring_macro():
     # https://github.com/hylang/hy/issues/2695
     hy.eval(hy.read("(require tests.resources.macros)"), globals={})
+
+
+class MacroDepsProject:
+    """A package `pkg` with a macro module, a helper module that the
+    macro calls, and a user module, imported in fresh interpreters."""
+
+    def __init__(self, root):
+        self.root = root
+        self.pkg = root / "pkg"
+        self.pkg.mkdir()
+        (self.pkg / "__init__.py").write_text("")
+        self.helper = self.pkg / "helper.py"
+        self.macros = self.pkg / "macros.hy"
+        self.user = root / "user.hy"
+        self.write(self.helper, 'def suffix(): return "h1"')
+        self.write(self.macros, self.macro_source("m1"))
+        self.write(self.user, "(require pkg.macros [m]) (setv x (m))")
+
+    @staticmethod
+    def macro_source(tag):
+        return f'(import pkg.helper [suffix]) (defmacro m [] (+ "{tag}-" (suffix)))'
+
+    @staticmethod
+    def write(path, text):
+        "Write `text` and move the modification time forward, as an edit would."
+        previous = path.stat().st_mtime_ns if path.exists() else None
+        path.write_text(text)
+        if previous is not None:
+            later = previous + 10 * 10**9
+            os.utime(path, ns=(later, later))
+
+    def bytecode(self, source):
+        return Path(importlib.util.cache_from_source(str(source)))
+
+    def run(self):
+        "Import `user` in a new interpreter. Return `x` and the files compiled."
+        result = subprocess.run(
+            [sys.executable, "-c", "import hy, user; print(user.x)"],
+            cwd=self.root,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(self.root),
+                "HY_MESSAGE_WHEN_COMPILING": "1",
+                "PYTHONDONTWRITEBYTECODE": "",
+                "PYTHONPYCACHEPREFIX": ""},
+            capture_output=True,
+            text=True,
+            check=True)
+        compiled = {
+            Path(line.removeprefix("Compiling ")).name
+            for line in result.stderr.splitlines()
+            if line.startswith("Compiling ")}
+        return result.stdout.strip(), compiled
+
+
+bytecode_is_written = pytest.mark.skipif(
+    sys.dont_write_bytecode or bool(sys.pycache_prefix),
+    reason="Bytecode isn't written beside the source")
+
+
+@bytecode_is_written
+def test_macro_deps_unchanged(tmp_path):
+    "Bytecode is reused so long as the macros it was expanded with are unchanged."
+    project = MacroDepsProject(tmp_path)
+    assert project.run() == ("m1-h1", {"macros.hy", "user.hy"})
+    assert project.run() == ("m1-h1", set())
+
+
+@bytecode_is_written
+def test_macro_deps_macro_changed(tmp_path):
+    "A change to a macro recompiles the modules that use it."
+    project = MacroDepsProject(tmp_path)
+    assert project.run()[0] == "m1-h1"
+    project.write(project.macros, project.macro_source("m2"))
+    assert project.run() == ("m2-h1", {"macros.hy", "user.hy"})
+    assert project.run() == ("m2-h1", set())
+
+
+@bytecode_is_written
+def test_macro_deps_helper_changed(tmp_path):
+    """A change to a module that a macro's module uses, in the same
+    package, recompiles the modules that use the macro."""
+    project = MacroDepsProject(tmp_path)
+    assert project.run()[0] == "m1-h1"
+    project.write(project.helper, 'def suffix(): return "h2"')
+    assert project.run() == ("m1-h2", {"user.hy"})
+    assert project.run() == ("m1-h2", set())
+
+
+@bytecode_is_written
+def test_macro_deps_transitive(tmp_path):
+    """A change to the macro that a macro was written with recompiles
+    the users of the latter."""
+    project = MacroDepsProject(tmp_path)
+    base = project.pkg / "base.hy"
+    project.write(base, '(defmacro tag [] "b1")')
+    project.write(
+        project.macros,
+        "(require pkg.base [tag]) (defmacro m [] (tag))")
+    assert project.run()[0] == "b1"
+    project.write(base, '(defmacro tag [] "b2")')
+    assert project.run() == ("b2", {"base.hy", "macros.hy", "user.hy"})
+    assert project.run() == ("b2", set())
+
+
+@bytecode_is_written
+def test_macro_deps_unrecorded_bytecode(tmp_path):
+    """Bytecode with no record of its macros (e.g., from an older Hy)
+    is recompiled, and is a regular bytecode file either way."""
+    project = MacroDepsProject(tmp_path)
+    assert project.run()[0] == "m1-h1"
+
+    from hy.importer import _MACRO_DEPS_MAGIC
+    bytecode = project.bytecode(project.user)
+    data = bytecode.read_bytes()
+    assert data.endswith(_MACRO_DEPS_MAGIC)
+    # The record follows the marshalled code, which Python reads alone.
+    code = marshal.loads(data[16:])
+    assert data.index(marshal.dumps(code)) == 16
+    bytecode.write_bytes(data[: 16 + len(marshal.dumps(code))])
+
+    assert project.run() == ("m1-h1", {"user.hy"})
+    assert bytecode.read_bytes() == data
+    assert project.run() == ("m1-h1", set())
