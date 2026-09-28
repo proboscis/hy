@@ -2,6 +2,7 @@
 
 import codecs
 import inspect
+import sys
 from contextlib import contextmanager, nullcontext
 from itertools import islice
 
@@ -139,7 +140,7 @@ class HyReader(Reader):
 
         if use_current_readers:
             self.reader_macros.update(
-                inspect.stack()[1].frame.f_globals.get("_hy_reader_macros", {})
+                sys._getframe(1).f_globals.get("_hy_reader_macros", {})
             )
 
     @classmethod

@@ -3,6 +3,7 @@ import builtins
 import copy
 import importlib
 import inspect
+import sys
 import traceback
 import types
 import warnings
@@ -52,7 +53,7 @@ def calling_module(n=1):
     Returns:
         types.ModuleType: The module at stack level `n + 1` or `None`.
     """
-    frame_up = inspect.stack(0)[n + 1][0]
+    frame_up = sys._getframe(n + 1)
     module = inspect.getmodule(frame_up)
     if module is None:
         # This works for modules like `__main__`
@@ -807,7 +808,7 @@ def hy_eval_user(model, globals = None, locals = None, module = None, macros = N
         value = hy_eval(
             hytree = model,
             globals = globals,
-            locals = (inspect.getargvalues(inspect.stack()[1][0]).locals
+            locals = (inspect.getargvalues(sys._getframe(1)).locals
                 if locals is None and module is None
                 else locals),
             module = get_compiler_module(module, None, True),

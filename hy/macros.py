@@ -150,7 +150,7 @@ def import_module_from_string(module_name, package_module):
 
 def require_reader(source_module, target_module, assignments):
     target_module, target_namespace = derive_target_module(
-        target_module, inspect.stack()[1][0]
+        target_module, sys._getframe(1)
     )
 
     if _same_modules(source_module, target_module):
@@ -176,7 +176,7 @@ def require_reader(source_module, target_module, assignments):
 
 
 def enable_readers(module, reader, names):
-    _, namespace = derive_target_module(module, inspect.stack()[1][0])
+    _, namespace = derive_target_module(module, sys._getframe(1))
     names = (
         namespace["_hy_reader_macros"].keys() if names == "ALL" else names
     )
@@ -200,7 +200,7 @@ def require(source_module, target, assignments, prefix="", target_module_name=No
         target_module = None
     else:
         target_module, target_namespace = derive_target_module(
-            target, inspect.stack()[1][0]
+            target, sys._getframe(1)
         )
         # Let's do a quick check to make sure the source module isn't actually
         # the module being compiled (e.g. when `runpy` executes a module's code
