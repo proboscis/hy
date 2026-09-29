@@ -430,7 +430,7 @@ importlib.machinery.SourceFileLoader.source_to_code = _hy_source_to_code
 # what the macros made of a module without importing it.
 
 # Hy itself records, under this namespace, the names that the module's
-# top-level statements bind by definition or assignment, so that a tool
+# top-level statements bind by definition, assignment, or import, so that a tool
 # reading the records of macros can tell whether they account for every
 # name it cares about (e.g., a test function defined without the macro).
 BOUND_NAMES_RECORD = "hy.bound-names"
@@ -446,6 +446,10 @@ def _bound_names(tree):
             for target in (stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]):
                 names.update(
                     node.id for node in ast.walk(target) if isinstance(node, ast.Name))
+        elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            names.update(
+                alias.asname or alias.name.partition(".")[0]
+                for alias in stmt.names if alias.name != "*")
     return sorted(names)
 
 
