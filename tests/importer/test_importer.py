@@ -590,7 +590,7 @@ def test_records_read_without_import(tmp_path):
     project = RecordsProject(tmp_path)
     assert project.read() is None
     assert project.run()[0] == "m1-h1"
-    expected = {"t": [{"tag": "m1", "helper": "h1"}], "hy.bound-names": ["hy", "x"], "hy.decorators": {}}
+    expected = {"t": [{"tag": "m1", "helper": "h1"}], "hy.bound-names": ["hy", "x"], "hy.decorators": {}, "hy.top-level-calls": ["hy.macros.require"]}
     assert project.read() == expected
     assert project.run() == ("m1-h1", set())
     assert project.read() == expected
@@ -675,3 +675,16 @@ def test_records_decorators(tmp_path):
         " (defclass [cache] C [])")
     project.run()
     assert project.read()["hy.decorators"] == {"f": ["cache", "functools.lru_cache"], "C": ["cache"]}
+
+
+@bytecode_is_written
+def test_records_top_level_calls(tmp_path):
+    "The functions called outside the bodies of functions and classes are recorded by name."
+    project = RecordsProject(tmp_path)
+    project.write(
+        project.user,
+        "(require pkg.macros [m]) (setv x (m)) (import os)"
+        " (when (os.getenv \"NEVER\") (os.path.join \"a\"))"
+        " (defn f [] (os.listdir)) (defclass C [] (setv y (os.getcwd))) (setv g (fn [] (os.sep.join)))")
+    project.run()
+    assert project.read()["hy.top-level-calls"] == ["hy.macros.require", "os.getenv", "os.path.join"]

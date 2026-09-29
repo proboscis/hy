@@ -411,7 +411,8 @@ def _hy_source_to_code(self, data, path, fullname=None, _optimize=-1):
             self._hy_compile_records = {
                 **records,
                 BOUND_NAMES_RECORD: _bound_names(data),
-                DECORATORS_RECORD: _decorators(data)}
+                DECORATORS_RECORD: _decorators(data),
+                TOP_LEVEL_CALLS_RECORD: _top_level_calls(data)}
 
     return _py_source_to_code(
         self, data, path,
@@ -442,6 +443,10 @@ BOUND_NAMES_RECORD = "hy.bound-names"
 # call, of the function called), since a decorator can make a definition
 # mean something to a tool whatever its name (e.g., a pytest fixture).
 DECORATORS_RECORD = "hy.decorators"
+# And, under this one, the dotted names of the functions that the module
+# calls when it's executed, outside the bodies of its functions and
+# classes (e.g., `pytest.skip`, which skips a whole test module).
+TOP_LEVEL_CALLS_RECORD = "hy.top-level-calls"
 
 
 def _bound_names(tree):
@@ -484,6 +489,25 @@ def _decorators(tree):
         for stmt in tree.body
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
         and stmt.decorator_list}
+
+
+def _top_level_calls(tree):
+    """Return the sorted dotted names of the functions called in the AST
+    module `tree` outside the bodies of its functions, lambdas, and
+    classes."""
+    names = set()
+    pending = list(tree.body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            pending.extend(node.decorator_list)
+            continue
+        if isinstance(node, ast.Lambda):
+            continue
+        if isinstance(node, ast.Call):
+            names.add(_dotted_name(node.func))
+        pending.extend(ast.iter_child_nodes(node))
+    return sorted(names)
 
 
 # The module being compiled for import, and its records so far.
