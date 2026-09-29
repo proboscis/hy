@@ -11,7 +11,7 @@ from contextlib import contextmanager
 from funcparserlib.parser import NoParseError, many
 
 import hy
-from hy.compat import PY3_14
+from hy.compat import PY3_14, calling_frame
 from hy.errors import HyCompileError, HyLanguageError, HySyntaxError
 from hy.macros import macroexpand
 from hy.model_patterns import FORM, KEYWORD, unpack
@@ -52,7 +52,7 @@ def calling_module(n=1):
     Returns:
         types.ModuleType: The module at stack level `n + 1` or `None`.
     """
-    frame_up = inspect.stack(0)[n + 1][0]
+    frame_up = calling_frame(n + 1)
     module = inspect.getmodule(frame_up)
     if module is None:
         # This works for modules like `__main__`
@@ -807,7 +807,7 @@ def hy_eval_user(model, globals = None, locals = None, module = None, macros = N
         value = hy_eval(
             hytree = model,
             globals = globals,
-            locals = (inspect.getargvalues(inspect.stack()[1][0]).locals
+            locals = (inspect.getargvalues(calling_frame(1)).locals
                 if locals is None and module is None
                 else locals),
             module = get_compiler_module(module, None, True),

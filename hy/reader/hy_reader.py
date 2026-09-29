@@ -1,11 +1,11 @@
 "Character reader for parsing Hy source."
 
 import codecs
-import inspect
 from contextlib import contextmanager, nullcontext
 from itertools import islice
 
 import hy
+from hy.compat import calling_frame
 from hy.models import (
     Bytes,
     Complex,
@@ -139,7 +139,7 @@ class HyReader(Reader):
 
         if use_current_readers:
             self.reader_macros.update(
-                inspect.stack()[1].frame.f_globals.get("_hy_reader_macros", {})
+                calling_frame(1).f_globals.get("_hy_reader_macros", {})
             )
 
     @classmethod

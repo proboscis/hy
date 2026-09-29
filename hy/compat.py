@@ -1,4 +1,5 @@
 import ast
+import inspect
 import platform
 import sys
 
@@ -43,3 +44,16 @@ if "def" in ast.unparse(ast.parse("𝕕𝕖𝕗 = 1")):
 def reu(x):
     '(R)eplace an (e)rror (u)nderline. This is only used for testing Hy.'
     return x.replace('-', '^') if PY3_13 else x
+
+
+def calling_frame(n=1):
+    """Return the frame `n` levels above the caller of this function,
+    like `inspect.stack()[n][0]` in the caller, but without building
+    `FrameInfo` objects for the whole stack. Falls back to
+    `inspect.stack` on implementations without frame support."""
+    frame = inspect.currentframe()
+    if frame is None:
+        return inspect.stack(0)[n + 1][0]
+    for _ in range(n + 1):
+        frame = frame.f_back
+    return frame

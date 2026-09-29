@@ -2,6 +2,15 @@
 
 Hy is `semantically versioned <https://semver.org/>`__ since 1.0.0.
 
+Unreleased
+======================================================================
+
+Misc. Improvements
+------------------------------
+* `require`, `hy.eval`, and other operations that need the calling frame
+  no longer build the whole call stack with `inspect.stack`, which made
+  importing modules with many `require` forms much slower than necessary.
+
 1.3.1 ("Eyes in the Sky", released 2026-07-31)
 ======================================================================
 
