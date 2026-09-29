@@ -15,6 +15,14 @@ Bug Fixes
   ending with `.hydeps`, and isn't checked for bytecode that Python
   doesn't check against its source (PEP 552's unchecked-hash files).
 
+New Features
+------------------------------
+* While a module is compiled from Hy source for import, its macros can
+  leave JSON records about it with `hy.importer.add-compile-record`.
+  The records are kept in the `.hydeps` file beside the bytecode, and
+  `hy.importer.read-valid-records` returns them without importing the
+  module, only when importing it would use that bytecode as it is.
+
 Misc. Improvements
 ------------------------------
 * `require`, `hy.eval`, and other operations that need the calling frame

@@ -1,6 +1,7 @@
 import ast
 import importlib
 import io
+import json
 import marshal
 import os
 import runpy
@@ -551,3 +552,100 @@ def test_macro_deps_checked_hash(tmp_path):
     assert project.run() == ("m1-h2", {"user.hy"})
     assert pyc_flags(project.bytecode(project.user).read_bytes()) == 0b11
     assert project.run() == ("m1-h2", set())
+
+
+class RecordsProject(MacroDepsProject):
+    """A `MacroDepsProject` whose macro also leaves a record about the
+    module it's expanded in."""
+
+    @staticmethod
+    def macro_source(tag):
+        return (
+            "(import pkg.helper [suffix] hy.importer [add-compile-record])"
+            " (defmacro m [_hy-compiler] (add-compile-record (. _hy-compiler module)"
+            f' "t" {{"tag" "{tag}" "helper" (suffix)}}) (+ "{tag}-" (suffix)))')
+
+    def read(self):
+        "Return the records of `user.hy` read in a new interpreter, without importing it."
+        result = subprocess.run(
+            [sys.executable, "-c",
+                "import hy, json, sys; from hy.importer import read_valid_records; "
+                "print(json.dumps(read_valid_records(sys.argv[1]))); "
+                "print('user' in sys.modules)",
+                str(self.user)],
+            cwd=self.root,
+            env={**os.environ, "PYTHONPATH": str(self.root),
+                "PYTHONDONTWRITEBYTECODE": "", "PYTHONPYCACHEPREFIX": ""},
+            capture_output=True,
+            text=True)
+        assert result.returncode == 0, result.stderr
+        records, imported = result.stdout.splitlines()
+        assert imported == "False"
+        return json.loads(records)
+
+
+@bytecode_is_written
+def test_records_read_without_import(tmp_path):
+    "The records a macro left are read back as long as the bytecode is used as it is."
+    project = RecordsProject(tmp_path)
+    assert project.read() is None
+    assert project.run()[0] == "m1-h1"
+    expected = {"t": [{"tag": "m1", "helper": "h1"}]}
+    assert project.read() == expected
+    assert project.run() == ("m1-h1", set())
+    assert project.read() == expected
+
+
+@bytecode_is_written
+@pytest.mark.parametrize("change", ["source", "macro", "helper", "bytecode", "record"])
+def test_records_stale_with_bytecode(tmp_path, change):
+    """Whenever importing would compile the module anew, there are no
+    records, and compiling it writes the new ones."""
+    project = RecordsProject(tmp_path)
+    assert project.run()[0] == "m1-h1"
+    if change == "source":
+        project.write(project.user, '(require pkg.macros [m]) (setv x (+ (m) "!"))')
+    elif change == "macro":
+        project.write(project.macros, project.macro_source("m2"))
+    elif change == "helper":
+        project.write(project.helper, 'def suffix(): return "h2"')
+    elif change == "bytecode":
+        project.bytecode(project.user).unlink()
+    else:
+        data = json.loads(project.record(project.user).read_text())
+        data["header"] = "00" * 16
+        project.record(project.user).write_text(json.dumps(data))
+    assert project.read() is None
+    project.run()
+    assert project.read() is not None
+
+
+@bytecode_is_written
+def test_records_of_older_record(tmp_path):
+    "A record without records (as from an older Hy) gives none, but still vouches for its bytecode."
+    project = RecordsProject(tmp_path)
+    assert project.run()[0] == "m1-h1"
+    data = json.loads(project.record(project.user).read_text())
+    del data["records"]
+    project.record(project.user).write_text(json.dumps(data))
+    assert project.read() is None
+    assert project.run() == ("m1-h1", set())
+
+
+def test_record_outside_compilation():
+    "Outside the compilation of the module named, nothing is recorded."
+    from hy.importer import add_compile_record
+    assert not add_compile_record(sys.modules[__name__], "t", 1)
+
+
+@bytecode_is_written
+def test_record_must_be_json(tmp_path):
+    "A value that can't be written into the record fails the expansion."
+    project = RecordsProject(tmp_path)
+    project.write(
+        project.macros,
+        "(import hy.importer [add-compile-record])"
+        " (defmacro m [_hy-compiler] (add-compile-record (. _hy-compiler module) \"t\" (object)) 1)")
+    with pytest.raises(subprocess.CalledProcessError) as e:
+        project.run()
+    assert "not JSON serializable" in e.value.stderr

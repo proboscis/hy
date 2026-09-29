@@ -1,5 +1,6 @@
 import _imp
 import builtins
+import contextvars
 import hashlib
 import importlib
 import inspect
@@ -242,30 +243,71 @@ def _macro_dependencies(module, path):
 _BYTECODE_HEADER_BYTES = 16
 
 
-def _macro_deps_record(bytecode, deps):
+def _macro_deps_record(bytecode, deps, records):
     "Return the record for the bytecode file `bytecode`."
     return json.dumps(dict(
         hy=hy.__version__,
         header=bytecode[:_BYTECODE_HEADER_BYTES].hex(),
-        deps=deps)).encode("utf-8")
+        deps=deps,
+        records=records)).encode("utf-8")
 
 
-def _macro_deps_are_current(record, bytecode):
+def _record_of(record, bytecode):
     """Given the contents of a record and of the bytecode file beside
-    it, return true if the record is of that bytecode file and its
-    macro dependencies are all unchanged."""
+    it, return the record, parsed, if it's of that bytecode file (and of
+    this Hy), and `None` otherwise."""
 
     try:
         record = json.loads(record)
         if (record["hy"] != hy.__version__ or
                 record["header"] != bytecode[:_BYTECODE_HEADER_BYTES].hex()):
-            return False
+            return None
+    except (ValueError, KeyError, TypeError):
+        return None
+    return record
+
+
+def _macro_deps_are_current(record):
+    "Return true if the macro dependencies of a parsed record are all unchanged."
+    try:
         for fname, digest in record["deps"]:
             if _source_digest(fname) != digest:
                 return False
     except (ValueError, KeyError, TypeError, OSError):
         return False
     return True
+
+
+# How the bytecode file beside a Hy source is to be treated, as decided
+# by `_bytecode_verdict`:
+# - "python": Python alone decides (there's no usable bytecode, or it's
+#   bytecode that Python uses without checking its source).
+# - "current": the record vouches for the bytecode's macros, and Python
+#   then checks the bytecode against its source as usual.
+# - "stale": the bytecode is to be recompiled from source.
+# `_hy_get_code` (for importing) and `read_valid_records` (for reading the
+# records without importing) both follow this one decision.
+
+
+def _bytecode_verdict(bytecode, read_record):
+    """Return `(verdict, record)` for the bytecode file `bytecode` (or
+    `None` if there's none), where `read_record` returns the contents of
+    the record beside it (raising `OSError` if there's none) and `record`
+    is that record, parsed, if it's of this bytecode file."""
+
+    if (bytecode is None or
+            len(bytecode) < _BYTECODE_HEADER_BYTES or
+            bytecode[:4] != importlib.util.MAGIC_NUMBER):
+        return "python", None
+    try:
+        record = _record_of(read_record(), bytecode)
+    except OSError:
+        record = None
+    if not _python_checks_source(bytecode):
+        return "python", record
+    if record is not None and _macro_deps_are_current(record):
+        return "current", record
+    return "stale", None
 
 
 def _python_checks_source(bytecode):
@@ -293,18 +335,12 @@ def _hy_get_code(self, fullname):
         # There's no bytecode to distrust. The usual path will compile
         # the source.
         return _py_get_code(self, fullname)
-    if (len(bytecode) < _BYTECODE_HEADER_BYTES or
-            bytecode[:4] != importlib.util.MAGIC_NUMBER or
-            not _python_checks_source(bytecode)):
-        # Python will either recompile the source anyway or use the
-        # bytecode without checking it.
+    verdict, _ = _bytecode_verdict(
+        bytecode, partial(self.get_data, _macro_deps_path(bytecode_path)))
+    if verdict != "stale":
+        # Python will either recompile the source anyway, use the
+        # bytecode without checking it, or check it against its source.
         return _py_get_code(self, fullname)
-    try:
-        if _macro_deps_are_current(
-                self.get_data(_macro_deps_path(bytecode_path)), bytecode):
-            return _py_get_code(self, fullname)
-    except OSError:
-        pass
 
     # Compile from source regardless of what the bytecode file says
     # about the source, and write the same kind of bytecode file.
@@ -341,6 +377,7 @@ _py_cache_bytecode = importlib.machinery.SourceFileLoader._cache_bytecode
 
 def _hy_cache_bytecode(self, source_path, bytecode_path, data):
     deps = self.__dict__.pop("_hy_macro_deps", None)
+    records = self.__dict__.pop("_hy_compile_records", None)
     result = _py_cache_bytecode(self, source_path, bytecode_path, data)
     if deps is not None:
         # The record names the header of the bytecode it describes, so
@@ -348,7 +385,7 @@ def _hy_cache_bytecode(self, source_path, bytecode_path, data):
         # the source doesn't vouch for that bytecode.
         self.set_data(
             _macro_deps_path(bytecode_path),
-            _macro_deps_record(bytes(data), deps))
+            _macro_deps_record(bytes(data), deps, records or {}))
     return result
 
 
@@ -363,8 +400,14 @@ def _hy_source_to_code(self, data, path, fullname=None, _optimize=-1):
         hy_tree = read_many(source, filename=path, skip_shebang=True, reader=HyReader())
         _source_digests[path] = _digest(data)
         with loader_module_obj(self) as module:
-            data = hy_compile(hy_tree, module)
+            records = {}
+            token = _compile_records.set((module, records))
+            try:
+                data = hy_compile(hy_tree, module)
+            finally:
+                _compile_records.reset(token)
             self._hy_macro_deps = _macro_dependencies(module, path)
+            self._hy_compile_records = records
 
     return _py_source_to_code(
         self, data, path,
@@ -373,6 +416,83 @@ def _hy_source_to_code(self, data, path, fullname=None, _optimize=-1):
 
 
 importlib.machinery.SourceFileLoader.source_to_code = _hy_source_to_code
+
+
+# Records of compilation. While a module is being compiled from Hy
+# source for import, its macros can leave records about it with
+# `add_compile_record` (e.g., the names of the tests that a test macro
+# defines). The records are written into the record of macro
+# dependencies beside the bytecode file, so they are exactly as current
+# as the bytecode: `read_valid_records` returns them only when the
+# import system would use that bytecode as it is. A tool can thus learn
+# what the macros made of a module without importing it.
+
+# The module being compiled for import, and its records so far.
+_compile_records = contextvars.ContextVar("_hy_compile_records", default=None)
+
+
+def add_compile_record(module, namespace, value):
+    """Record the JSON value `value` under the string `namespace` for
+    `module`, if `module` is being compiled from Hy source for import
+    (a macro that takes `_hy-compiler` can pass `(. _hy-compiler module)`), and return true if it
+    was recorded. Records are kept in the order they were added."""
+
+    current = _compile_records.get()
+    if current is None or current[0] is not module:
+        return False
+    # Fail at expansion, where the value was made, and not when the
+    # bytecode is written.
+    json.dumps(value)
+    current[1].setdefault(namespace, []).append(value)
+    return True
+
+
+def _bytecode_matches_source(source_path, bytecode):
+    """Return true if Python would find the bytecode `bytecode`, which
+    it checks against its source, to be of the source at `source_path`."""
+    name = os.path.basename(source_path)
+    details = dict(name=name, path=source_path)
+    external = importlib._bootstrap_external
+    try:
+        flags = external._classify_pyc(bytecode, name, details)
+        if flags & 0b01:
+            with open(source_path, "rb") as o:
+                external._validate_hash_pyc(
+                    bytecode, importlib.util.source_hash(o.read()), name, details)
+        else:
+            st = os.stat(source_path)
+            external._validate_timestamp_pyc(
+                bytecode, int(st.st_mtime), st.st_size, name, details)
+    except (ImportError, EOFError, OSError):
+        return False
+    return True
+
+
+def read_valid_records(source_path):
+    """Return the records (a dictionary from namespace to a list of
+    values) that were added with `add_compile_record` when the Hy source
+    at `source_path` was compiled to the bytecode file that importing it
+    would now use as it is, or `None` if importing it would compile it
+    anew (or there's no such record, as for bytecode from an older Hy)."""
+
+    try:
+        bytecode_path = importlib.util.cache_from_source(source_path)
+        with open(bytecode_path, "rb") as o:
+            bytecode = o.read()
+    except (NotImplementedError, OSError):
+        return None
+
+    def read_record():
+        with open(_macro_deps_path(bytecode_path), "rb") as o:
+            return o.read()
+
+    verdict, record = _bytecode_verdict(bytecode, read_record)
+    if record is None or verdict == "stale":
+        return None
+    if verdict == "current" and not _bytecode_matches_source(source_path, bytecode):
+        return None
+    records = record.get("records")
+    return records if isinstance(records, dict) else None
 
 
 if (".hy", False, False) not in zipimport._zip_searchorder:
