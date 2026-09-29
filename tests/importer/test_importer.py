@@ -590,7 +590,7 @@ def test_records_read_without_import(tmp_path):
     project = RecordsProject(tmp_path)
     assert project.read() is None
     assert project.run()[0] == "m1-h1"
-    expected = {"t": [{"tag": "m1", "helper": "h1"}]}
+    expected = {"t": [{"tag": "m1", "helper": "h1"}], "hy.bound-names": ["x"]}
     assert project.read() == expected
     assert project.run() == ("m1-h1", set())
     assert project.read() == expected
@@ -649,3 +649,15 @@ def test_record_must_be_json(tmp_path):
     with pytest.raises(subprocess.CalledProcessError) as e:
         project.run()
     assert "not JSON serializable" in e.value.stderr
+
+
+@bytecode_is_written
+def test_records_bound_names(tmp_path):
+    "The names bound at the top level are recorded, however they were bound."
+    project = RecordsProject(tmp_path)
+    project.write(
+        project.user,
+        "(require pkg.macros [m]) (setv x (m)) (setv [a b] [1 2])"
+        " (defn test-f []) (defclass TestC []) (when True (defn hidden []))")
+    project.run()
+    assert project.read()["hy.bound-names"] == ["TestC", "a", "b", "test_f", "x"]

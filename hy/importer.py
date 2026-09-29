@@ -1,4 +1,5 @@
 import _imp
+import ast
 import builtins
 import contextvars
 import hashlib
@@ -407,7 +408,8 @@ def _hy_source_to_code(self, data, path, fullname=None, _optimize=-1):
             finally:
                 _compile_records.reset(token)
             self._hy_macro_deps = _macro_dependencies(module, path)
-            self._hy_compile_records = records
+            self._hy_compile_records = {
+                **records, BOUND_NAMES_RECORD: _bound_names(data)}
 
     return _py_source_to_code(
         self, data, path,
@@ -426,6 +428,26 @@ importlib.machinery.SourceFileLoader.source_to_code = _hy_source_to_code
 # as the bytecode: `read_valid_records` returns them only when the
 # import system would use that bytecode as it is. A tool can thus learn
 # what the macros made of a module without importing it.
+
+# Hy itself records, under this namespace, the names that the module's
+# top-level statements bind by definition or assignment, so that a tool
+# reading the records of macros can tell whether they account for every
+# name it cares about (e.g., a test function defined without the macro).
+BOUND_NAMES_RECORD = "hy.bound-names"
+
+
+def _bound_names(tree):
+    "Return the sorted names bound by the top-level statements of the AST module `tree`."
+    names = set()
+    for stmt in tree.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(stmt.name)
+        elif isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            for target in (stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target]):
+                names.update(
+                    node.id for node in ast.walk(target) if isinstance(node, ast.Name))
+    return sorted(names)
+
 
 # The module being compiled for import, and its records so far.
 _compile_records = contextvars.ContextVar("_hy_compile_records", default=None)
