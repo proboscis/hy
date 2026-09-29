@@ -409,7 +409,9 @@ def _hy_source_to_code(self, data, path, fullname=None, _optimize=-1):
                 _compile_records.reset(token)
             self._hy_macro_deps = _macro_dependencies(module, path)
             self._hy_compile_records = {
-                **records, BOUND_NAMES_RECORD: _bound_names(data)}
+                **records,
+                BOUND_NAMES_RECORD: _bound_names(data),
+                DECORATED_NAMES_RECORD: _decorated_names(data)}
 
     return _py_source_to_code(
         self, data, path,
@@ -434,6 +436,11 @@ importlib.machinery.SourceFileLoader.source_to_code = _hy_source_to_code
 # reading the records of macros can tell whether they account for every
 # name it cares about (e.g., a test function defined without the macro).
 BOUND_NAMES_RECORD = "hy.bound-names"
+# And, under this one, the names of the top-level definitions (functions
+# and classes) that have decorators, since a decorator can make a
+# definition mean something to a tool whatever its name (e.g., a pytest
+# fixture).
+DECORATED_NAMES_RECORD = "hy.decorated-names"
 
 
 def _bound_names(tree):
@@ -451,6 +458,14 @@ def _bound_names(tree):
                 alias.asname or alias.name.partition(".")[0]
                 for alias in stmt.names if alias.name != "*")
     return sorted(names)
+
+
+def _decorated_names(tree):
+    "Return the sorted names of the top-level definitions in the AST module `tree` that have decorators."
+    return sorted(
+        stmt.name for stmt in tree.body
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        and stmt.decorator_list)
 
 
 # The module being compiled for import, and its records so far.

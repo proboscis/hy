@@ -590,7 +590,7 @@ def test_records_read_without_import(tmp_path):
     project = RecordsProject(tmp_path)
     assert project.read() is None
     assert project.run()[0] == "m1-h1"
-    expected = {"t": [{"tag": "m1", "helper": "h1"}], "hy.bound-names": ["hy", "x"]}
+    expected = {"t": [{"tag": "m1", "helper": "h1"}], "hy.bound-names": ["hy", "x"], "hy.decorated-names": []}
     assert project.read() == expected
     assert project.run() == ("m1-h1", set())
     assert project.read() == expected
@@ -662,3 +662,15 @@ def test_records_bound_names(tmp_path):
         " (import os.path [join :as test-join])")
     project.run()
     assert project.read()["hy.bound-names"] == ["TestC", "a", "b", "hy", "test_f", "test_join", "x"]
+
+
+@bytecode_is_written
+def test_records_decorated_names(tmp_path):
+    "The top-level definitions that have decorators are recorded by name."
+    project = RecordsProject(tmp_path)
+    project.write(
+        project.user,
+        "(require pkg.macros [m]) (setv x (m)) (import functools [cache])"
+        " (defn [cache] fixture-f []) (defn plain []) (defclass [cache] C [])")
+    project.run()
+    assert project.read()["hy.decorated-names"] == ["C", "fixture_f"]
