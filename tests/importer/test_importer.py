@@ -590,7 +590,7 @@ def test_records_read_without_import(tmp_path):
     project = RecordsProject(tmp_path)
     assert project.read() is None
     assert project.run()[0] == "m1-h1"
-    expected = {"t": [{"tag": "m1", "helper": "h1"}], "hy.bound-names": ["hy", "x"], "hy.decorated-names": []}
+    expected = {"t": [{"tag": "m1", "helper": "h1"}], "hy.bound-names": ["hy", "x"], "hy.decorators": {}}
     assert project.read() == expected
     assert project.run() == ("m1-h1", set())
     assert project.read() == expected
@@ -665,12 +665,13 @@ def test_records_bound_names(tmp_path):
 
 
 @bytecode_is_written
-def test_records_decorated_names(tmp_path):
-    "The top-level definitions that have decorators are recorded by name."
+def test_records_decorators(tmp_path):
+    "The decorators of top-level definitions are recorded by their dotted names."
     project = RecordsProject(tmp_path)
     project.write(
         project.user,
-        "(require pkg.macros [m]) (setv x (m)) (import functools [cache])"
-        " (defn [cache] fixture-f []) (defn plain []) (defclass [cache] C [])")
+        "(require pkg.macros [m]) (setv x (m)) (import functools [cache] functools)"
+        " (defn [cache (functools.lru-cache :maxsize 2)] f []) (defn plain [])"
+        " (defclass [cache] C [])")
     project.run()
-    assert project.read()["hy.decorated-names"] == ["C", "fixture_f"]
+    assert project.read()["hy.decorators"] == {"f": ["cache", "functools.lru_cache"], "C": ["cache"]}

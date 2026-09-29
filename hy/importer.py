@@ -411,7 +411,7 @@ def _hy_source_to_code(self, data, path, fullname=None, _optimize=-1):
             self._hy_compile_records = {
                 **records,
                 BOUND_NAMES_RECORD: _bound_names(data),
-                DECORATED_NAMES_RECORD: _decorated_names(data)}
+                DECORATORS_RECORD: _decorators(data)}
 
     return _py_source_to_code(
         self, data, path,
@@ -436,11 +436,12 @@ importlib.machinery.SourceFileLoader.source_to_code = _hy_source_to_code
 # reading the records of macros can tell whether they account for every
 # name it cares about (e.g., a test function defined without the macro).
 BOUND_NAMES_RECORD = "hy.bound-names"
-# And, under this one, the names of the top-level definitions (functions
-# and classes) that have decorators, since a decorator can make a
-# definition mean something to a tool whatever its name (e.g., a pytest
-# fixture).
-DECORATED_NAMES_RECORD = "hy.decorated-names"
+# And, under this one, the decorators of the top-level definitions
+# (functions and classes), as a dictionary from the name of each
+# decorated definition to the dotted names of its decorators (for a
+# call, of the function called), since a decorator can make a definition
+# mean something to a tool whatever its name (e.g., a pytest fixture).
+DECORATORS_RECORD = "hy.decorators"
 
 
 def _bound_names(tree):
@@ -460,12 +461,29 @@ def _bound_names(tree):
     return sorted(names)
 
 
-def _decorated_names(tree):
-    "Return the sorted names of the top-level definitions in the AST module `tree` that have decorators."
-    return sorted(
-        stmt.name for stmt in tree.body
+def _dotted_name(node):
+    """Return the dotted name that the AST expression `node` is (e.g.,
+    `pytest.fixture`), naming the function for a call, or its source
+    otherwise."""
+    if isinstance(node, ast.Call):
+        node = node.func
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        return ".".join([node.id, *reversed(parts)])
+    return ast.unparse(node)
+
+
+def _decorators(tree):
+    """Return a dictionary from the name of each top-level definition in
+    the AST module `tree` that has decorators to their dotted names."""
+    return {
+        stmt.name: [_dotted_name(d) for d in stmt.decorator_list]
+        for stmt in tree.body
         if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-        and stmt.decorator_list)
+        and stmt.decorator_list}
 
 
 # The module being compiled for import, and its records so far.
